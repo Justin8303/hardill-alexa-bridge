@@ -36,8 +36,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "bridge": bridge,
         "sync": sync,
     }
-    await bridge.async_start()
+    # Build the appliance-to-entity map before subscribing to MQTT so an Alexa
+    # command cannot arrive during startup while mappings are still empty.
     await sync.async_start()
+    await bridge.async_start()
     return True
 
 

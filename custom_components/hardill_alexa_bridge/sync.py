@@ -192,6 +192,17 @@ class HardillExposureSync:
         used_remote: set[str] = set()
         needs_admin = False
 
+        # Keep previous appliance IDs routable after a managed device had to be
+        # recreated (for example because its Alexa name changed). Alexa can cache
+        # an old applianceId until the next discovery. Hardill correlates replies
+        # by messageId, so responding on the old appliance-specific topic is safe.
+        for entity_id, record in self._managed.items():
+            if entity_id not in specs:
+                continue
+            for old_appliance_id in record.get("legacy_appliance_ids", []):
+                if old_appliance_id:
+                    mappings[str(old_appliance_id)] = entity_id
+
         # Preserve old v0.1 mappings if the corresponding entity is still exposed.
         for appliance_id, entity_id in self.legacy_mappings.items():
             if entity_id in specs and appliance_id in remote_by_id:
@@ -261,8 +272,22 @@ class HardillExposureSync:
                         await self._async_delete_managed(admin, entity_id)
 
                     # A rename requires delete + recreate because Hardill's edit API
-                    # deliberately keeps friendlyName immutable.
+                    # deliberately keeps friendlyName immutable. Preserve the old
+                    # applianceId as a routing alias because Alexa may still address
+                    # it until device discovery has refreshed its cache.
+                    recreate_aliases: dict[str, list[str]] = {}
                     for entity_id in sorted(recreate):
+                        record = self._managed.get(entity_id) or {}
+                        aliases = [
+                            str(value)
+                            for value in record.get("legacy_appliance_ids", [])
+                            if value
+                        ]
+                        old_id = record.get("appliance_id")
+                        if old_id:
+                            aliases.append(str(old_id))
+                        # Deduplicate while retaining order and bound the history.
+                        recreate_aliases[entity_id] = list(dict.fromkeys(aliases))[-5:]
                         await self._async_delete_managed(admin, entity_id)
 
                     # Update capabilities of still-existing managed devices.
@@ -278,7 +303,17 @@ class HardillExposureSync:
                             actions=list(spec.actions),
                             appliance_types=list(spec.appliance_types),
                         )
-                        self._managed[entity_id] = _managed_record(updated, spec)
+                        updated_record = _managed_record(updated, spec)
+                        aliases = [
+                            str(value)
+                            for value in record.get("legacy_appliance_ids", [])
+                            if value
+                        ]
+                        if aliases:
+                            updated_record["legacy_appliance_ids"] = list(
+                                dict.fromkeys(aliases)
+                            )[-5:]
+                        self._managed[entity_id] = updated_record
 
                     # Create any exposed entity that still has no usable remote device.
                     mapped_entities = set(mappings.values())
@@ -292,6 +327,11 @@ class HardillExposureSync:
                             appliance_types=list(spec.appliance_types),
                         )
                         record = _managed_record(created, spec)
+                        aliases = recreate_aliases.get(entity_id, []) if "recreate_aliases" in locals() else []
+                        if aliases:
+                            record["legacy_appliance_ids"] = aliases
+                            for old_appliance_id in aliases:
+                                mappings[str(old_appliance_id)] = entity_id
                         self._managed[entity_id] = record
                         appliance_id = record["appliance_id"]
                         mappings[appliance_id] = entity_id
