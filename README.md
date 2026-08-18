@@ -13,7 +13,7 @@ exposure selection to Hardill/Alexa.
 > skill would stop working in November 2025. This project is useful only while
 > the legacy skill still works for your Alexa account.
 
-## v0.2 automatic exposure sync
+## v0.3 automatic exposure sync and Alexa naming
 
 Home Assistant does not let custom integrations register an additional assistant
 in the built-in **Settings -> Voice assistants -> Expose** UI. Therefore this
@@ -32,8 +32,14 @@ logs into Hardill's web device-management endpoint and creates one automatically
 - If an integration-created entity is no longer exposed, its Hardill device is
   deleted automatically.
 - Manually-created Hardill devices are never deleted by the integration.
-- If an HA entity is renamed, an integration-managed Hardill device is recreated,
-  because the legacy Hardill UI/API does not support changing a device name.
+- Alexa names use the first explicit Home Assistant entity/voice alias when one
+  is configured; otherwise the normal Home Assistant friendly name is used.
+- Duplicate names are disambiguated with the Home Assistant area first, then the
+  device name, and only as a last resort with a stable number. Technical
+  `entity_id` fragments are no longer added to Alexa names.
+- If an alias, HA name, device name or area changes, an integration-managed
+  Hardill device is recreated with the new Alexa name because the legacy Hardill
+  UI/API does not support changing a device name.
 
 After devices are added/removed/renamed, ask Alexa:
 
@@ -111,6 +117,9 @@ MQTT client identity and can disconnect each other.
 
 ## Version
 
+- 0.3.0: prefer HA voice/entity aliases for Alexa names; disambiguate duplicate
+  names as area + name, then device + name, with stable numeric fallback; react
+  to entity/device/area renames.
 - 0.2.0: automatic synchronization from HA Assist exposure; automatic Hardill
   device creation/update/deletion; migration reuse of existing devices.
 - 0.1.0: initial manual mapping implementation.

@@ -12,6 +12,11 @@ from homeassistant.components.homeassistant.exposed_entities import (
     async_should_expose,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, State, callback
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.storage import Store
 
 from .api import (
@@ -91,10 +96,22 @@ class HardillExposureSync:
                 self.hass, EXPOSURE_ASSISTANT, self._schedule_sync
             )
         )
-        # Renames/removals in the entity registry may affect the Alexa name or
-        # whether an entity still exists. Exposure changes have their own listener.
+        # Names, aliases and area/device assignments can all affect the Alexa
+        # friendly name. Exposure changes have their own listener above.
         self._unsubs.append(
-            self.hass.bus.async_listen("entity_registry_updated", self._registry_updated)
+            self.hass.bus.async_listen(
+                er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_updated
+            )
+        )
+        self._unsubs.append(
+            self.hass.bus.async_listen(
+                ar.EVENT_AREA_REGISTRY_UPDATED, self._registry_updated
+            )
+        )
+        self._unsubs.append(
+            self.hass.bus.async_listen(
+                dr.EVENT_DEVICE_REGISTRY_UPDATED, self._registry_updated
+            )
         )
         await self.async_sync()
 
@@ -315,38 +332,115 @@ class HardillExposureSync:
         self._managed.pop(entity_id, None)
 
     def _collect_exposed_specs(self) -> dict[str, DeviceSpec]:
-        states: list[State] = []
+        """Collect exposed entities and derive human-friendly Alexa names.
+
+        Naming priority:
+        1. First explicit Home Assistant voice/entity alias.
+        2. Home Assistant friendly name.
+        3. For collisions, prefix the area name.
+        4. If that still collides, add the device name.
+        5. As a last resort, use a stable numeric suffix instead of an entity_id.
+        """
+        candidates: dict[str, tuple[DeviceSpec, str | None, str | None]] = {}
+
         for state in self.hass.states.async_all():
             if not async_should_expose(
                 self.hass, EXPOSURE_ASSISTANT, state.entity_id
             ):
                 continue
-            if _entity_spec(state) is not None:
-                states.append(state)
 
-        # Alexa names must be useful and preferably unique. If two exposed entities
-        # have the same friendly name, suffix both with their HA object id.
-        counts: dict[str, int] = {}
-        for state in states:
-            base = _base_name(state)
-            counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
-
-        result: dict[str, DeviceSpec] = {}
-        for state in states:
-            spec = _entity_spec(state)
+            preferred_name = self._preferred_name(state)
+            spec = _entity_spec(state, preferred_name)
             if spec is None:
                 continue
-            if counts[_base_name(state).casefold()] > 1:
-                object_id = state.entity_id.split(".", 1)[1].replace("_", " ")
+
+            candidates[state.entity_id] = (
+                spec,
+                self._area_name(state.entity_id),
+                self._device_name(state.entity_id),
+            )
+
+        names = {entity_id: item[0].name for entity_id, item in candidates.items()}
+
+        # First disambiguation level: area + name, e.g.
+        # "Wohnzimmer Deckenlampe" and "Schlafzimmer Deckenlampe".
+        for group in _duplicate_name_groups(names):
+            for entity_id in group:
+                _spec, area_name, _device_name = candidates[entity_id]
+                if area_name:
+                    names[entity_id] = _combine_name(area_name, names[entity_id])
+
+        # Second level: device name. This handles two same-named entities in one
+        # area without leaking a technical entity_id into Alexa.
+        for group in _duplicate_name_groups(names):
+            for entity_id in group:
+                _spec, _area_name, device_name = candidates[entity_id]
+                if device_name:
+                    names[entity_id] = _combine_name(device_name, names[entity_id])
+
+        # Last resort: deterministic numbering. Sorting by entity_id keeps the
+        # assignment stable across Home Assistant restarts.
+        for group in _duplicate_name_groups(names):
+            for index, entity_id in enumerate(sorted(group), start=1):
+                names[entity_id] = f"{names[entity_id]} {index}"
+
+        result: dict[str, DeviceSpec] = {}
+        for entity_id, (spec, _area_name, _device_name) in candidates.items():
+            final_name = names[entity_id]
+            if final_name != spec.name:
                 spec = DeviceSpec(
                     entity_id=spec.entity_id,
-                    name=f"{spec.name} ({object_id})",
+                    name=final_name,
                     description=spec.description,
                     actions=spec.actions,
                     appliance_types=spec.appliance_types,
                 )
-            result[state.entity_id] = spec
+            result[entity_id] = spec
+
         return result
+
+    def _preferred_name(self, state: State) -> str:
+        """Return explicit voice alias first, otherwise HA's friendly name."""
+        entity_registry = er.async_get(self.hass)
+        if (entry := entity_registry.async_get(state.entity_id)) is not None:
+            # RegistryEntry.aliases can also contain Home Assistant's internal
+            # COMPUTED_NAME sentinel. Only actual strings are user aliases.
+            for alias in entry.aliases:
+                if isinstance(alias, str) and (alias := alias.strip()):
+                    return alias
+
+        return _base_name(state)
+
+    def _area_name(self, entity_id: str) -> str | None:
+        """Return the effective Home Assistant area name for an entity."""
+        entity_registry = er.async_get(self.hass)
+        entry = entity_registry.async_get(entity_id)
+        if entry is None:
+            return None
+
+        area_id = entry.area_id
+        if area_id is None and entry.device_id is not None:
+            device_registry = dr.async_get(self.hass)
+            if (device := device_registry.async_get(entry.device_id)) is not None:
+                area_id = dr.async_get_effective_area_id(self.hass, device)
+
+        if area_id is None:
+            return None
+        area = ar.async_get(self.hass).async_get_area(area_id)
+        if area is None:
+            return None
+        return _clean_name(area.name)
+
+    def _device_name(self, entity_id: str) -> str | None:
+        """Return the user-visible HA device name for an entity, if any."""
+        entity_registry = er.async_get(self.hass)
+        entry = entity_registry.async_get(entity_id)
+        if entry is None or entry.device_id is None:
+            return None
+        device = dr.async_get(self.hass).async_get(entry.device_id)
+        if device is None:
+            return None
+        return _clean_name(device.name_by_user or device.name)
 
 
 def _managed_record(payload: dict[str, Any], spec: DeviceSpec) -> dict[str, Any]:
@@ -363,18 +457,54 @@ def _managed_record(payload: dict[str, Any], spec: DeviceSpec) -> dict[str, Any]
     }
 
 
-def _base_name(state: State) -> str:
-    name = state.name.strip() if state.name else ""
-    if name:
+def _clean_name(value: str | None) -> str | None:
+    """Normalize whitespace in a user-facing name."""
+    if not value:
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned or None
+
+
+def _combine_name(prefix: str, name: str) -> str:
+    """Combine two display-name parts without obvious duplication."""
+    prefix = _clean_name(prefix) or ""
+    name = _clean_name(name) or ""
+    if not prefix:
         return name
-    return state.entity_id.split(".", 1)[1].replace("_", " ").strip()
+    if not name:
+        return prefix
+
+    prefix_folded = prefix.casefold()
+    name_folded = name.casefold()
+    if name_folded == prefix_folded:
+        return name
+    if name_folded.startswith(f"{prefix_folded} "):
+        return name
+    if name_folded.endswith(f" {prefix_folded}"):
+        return name
+    return f"{prefix} {name}"
 
 
-def _entity_spec(state: State) -> DeviceSpec | None:
+def _duplicate_name_groups(names: dict[str, str]) -> list[list[str]]:
+    """Return groups of entity IDs whose current names collide."""
+    groups: dict[str, list[str]] = {}
+    for entity_id, name in names.items():
+        groups.setdefault(name.casefold(), []).append(entity_id)
+    return [group for group in groups.values() if len(group) > 1]
+
+
+def _base_name(state: State) -> str:
+    if name := _clean_name(state.name):
+        return name
+    object_id = state.entity_id.split(".", 1)[1].replace("_", " ")
+    return _clean_name(object_id) or state.entity_id
+
+
+def _entity_spec(state: State, preferred_name: str | None = None) -> DeviceSpec | None:
     """Return the best legacy Alexa-v2 capabilities for one HA state."""
     entity_id = state.entity_id
     domain = entity_id.split(".", 1)[0]
-    name = _base_name(state)
+    name = _clean_name(preferred_name) or _base_name(state)
     description = f"{MANAGED_DESCRIPTION_PREFIX}: {entity_id}"
     attrs = state.attributes
 
