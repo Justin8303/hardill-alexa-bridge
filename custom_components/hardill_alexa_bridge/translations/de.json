@@ -1,0 +1,22 @@
+{
+  "title": "Hardill Alexa Bridge",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hardill Alexa Bridge verbinden",
+        "description": "Verwende denselben Account wie bei node-red-contrib-alexa-home-skill. Danach werden Entities, die für Home Assistant Assist freigegeben sind, automatisch zu Hardill/Alexa gespiegelt.",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Benutzername oder Passwort ist ungültig.",
+      "cannot_connect": "Verbindung zur Hardill-Bridge fehlgeschlagen."
+    },
+    "abort": {
+      "already_configured": "Dieser Hardill-Account ist bereits eingerichtet."
+    }
+  }
+}
