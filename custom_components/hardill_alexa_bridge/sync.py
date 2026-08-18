@@ -422,7 +422,17 @@ class HardillExposureSync:
         if area_id is None and entry.device_id is not None:
             device_registry = dr.async_get(self.hass)
             if (device := device_registry.async_get(entry.device_id)) is not None:
-                area_id = dr.async_get_effective_area_id(self.hass, device)
+                # HA versions before async_get_effective_area_id() was exposed
+                # publicly still store the same information on the registry
+                # entries. Resolve it directly for compatibility: a device's
+                # own area wins; child devices inherit the parent's area.
+                area_id = device.area_id
+                if area_id is None:
+                    parent_device_id = getattr(device, "parent_device_id", None)
+                    if parent_device_id is not None:
+                        parent = device_registry.async_get(parent_device_id)
+                        if parent is not None:
+                            area_id = parent.area_id
 
         if area_id is None:
             return None

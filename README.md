@@ -117,6 +117,7 @@ MQTT client identity and can disconnect each other.
 
 ## Version
 
+- 0.3.1: fix area-name lookup on Home Assistant versions without `device_registry.async_get_effective_area_id()`; child devices still inherit their parent area.
 - 0.3.0: prefer HA voice/entity aliases for Alexa names; disambiguate duplicate
   names as area + name, then device + name, with stable numeric fallback; react
   to entity/device/area renames.
