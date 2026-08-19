@@ -11,7 +11,8 @@ from homeassistant.components.homeassistant.exposed_entities import (
     async_listen_entity_updates,
     async_should_expose,
 )
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, State, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CALLBACK_TYPE, CoreState, HomeAssistant, State, callback
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -113,7 +114,31 @@ class HardillExposureSync:
                 dr.EVENT_DEVICE_REGISTRY_UPDATED, self._registry_updated
             )
         )
-        await self.async_sync()
+        # Do not contact Hardill's HTTP API from config-entry setup. A remote
+        # device reconciliation may require several sequential web requests and
+        # can otherwise hold Home Assistant's bootstrap open long enough for the
+        # global startup timeout to cancel this setup task. Build the command map
+        # entirely from the local Store first so MQTT can start immediately.
+        specs = self._collect_exposed_specs()
+        mappings = self._local_mappings(specs)
+        self.bridge.set_mappings(mappings)
+        _LOGGER.info(
+            "Hardill Alexa local startup map ready: %d exposed HA entities, %d mappings",
+            len(specs),
+            len(mappings),
+        )
+
+        # Reconcile the remote Hardill device inventory only after Home Assistant
+        # has completed startup. If the config entry is added/reloaded at runtime,
+        # Home Assistant is already running, so schedule the sync immediately.
+        if self.hass.state is CoreState.running:
+            self._schedule_sync()
+        else:
+            self._unsubs.append(
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._home_assistant_started
+                )
+            )
 
     async def async_stop(self) -> None:
         """Stop listeners and pending synchronization work."""
@@ -134,8 +159,37 @@ class HardillExposureSync:
         self._sync_task = None
 
     @callback
+    def _home_assistant_started(self, _event) -> None:
+        """Start the first remote reconciliation after HA startup completed."""
+        self._schedule_sync()
+
+    @callback
     def _registry_updated(self, _event) -> None:
         self._schedule_sync()
+
+    def _local_mappings(self, specs: dict[str, DeviceSpec]) -> dict[str, str]:
+        """Build appliance mappings using only locally persisted state.
+
+        This method deliberately performs no network I/O and is safe to use from
+        config-entry setup. Remote metadata recovery happens in the later full sync.
+        """
+        mappings: dict[str, str] = {}
+
+        for entity_id, record in self._managed.items():
+            if entity_id not in specs:
+                continue
+            appliance_id = record.get("appliance_id")
+            if appliance_id:
+                mappings[str(appliance_id)] = entity_id
+            for old_appliance_id in record.get("legacy_appliance_ids", []):
+                if old_appliance_id:
+                    mappings[str(old_appliance_id)] = entity_id
+
+        for appliance_id, entity_id in self.legacy_mappings.items():
+            if entity_id in specs:
+                mappings[str(appliance_id)] = entity_id
+
+        return mappings
 
     @callback
     def _schedule_sync(self) -> None:
@@ -260,14 +314,19 @@ class HardillExposureSync:
                 recreate.add(entity_id)
                 needs_admin = True
                 continue
+
+            # Keep the currently stored applianceId routable even when this device
+            # is about to be recreated because of a rename. This closes the small
+            # window before Alexa discovery learns the replacement endpoint.
+            mappings[appliance_id] = entity_id
+            used_remote.add(appliance_id)
+
             # Hardill does not allow renaming an existing device. Recreate it if
             # HA's friendly name changed.
             if remote.friendly_name != spec.name:
                 recreate.add(entity_id)
                 needs_admin = True
                 continue
-            mappings[appliance_id] = entity_id
-            used_remote.add(appliance_id)
             if (
                 tuple(remote.raw.get("actions") or ()) != spec.actions
                 or tuple(remote.raw.get("applianceTypes") or ()) != spec.appliance_types
