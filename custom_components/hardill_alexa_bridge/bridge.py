@@ -153,22 +153,30 @@ class HardillAlexaBridge:
         # applianceId routable after Hardill had to recreate a renamed device.
         if not entity_id:
             details = appliance.get("additionalApplianceDetails") or {}
-            detail_entity_id = details.get("extraDetail1")
-            if (
-                isinstance(detail_entity_id, str)
-                and detail_entity_id in set(self.mappings.values())
-            ):
-                entity_id = detail_entity_id
-                _LOGGER.info(
-                    "Resolved stale Alexa device %s from additional appliance details to %s",
-                    appliance_id,
-                    entity_id,
-                )
+            detail_entity_id = details.get("extraDetail1") if isinstance(details, dict) else None
+            if isinstance(detail_entity_id, str):
+                detail_entity_id = detail_entity_id.strip()
+                # A stale Alexa endpoint can legitimately refer to an applianceId
+                # that no longer exists in Hardill's current device list. The
+                # entity id embedded in additionalApplianceDetails is therefore a
+                # stronger recovery key than the current appliance mapping. Accept
+                # it whenever that HA entity still exists, then cache the stale id
+                # for the lifetime of this bridge instance.
+                if self.hass.states.get(detail_entity_id) is not None:
+                    entity_id = detail_entity_id
+                    self.mappings[appliance_id] = entity_id
+                    _LOGGER.info(
+                        "Resolved and cached stale Alexa device %s from additional appliance details to %s",
+                        appliance_id,
+                        entity_id,
+                    )
 
         if not entity_id:
+            details = appliance.get("additionalApplianceDetails")
             _LOGGER.warning(
-                "Alexa device %s is not mapped to a Home Assistant entity",
+                "Alexa device %s is not mapped to a Home Assistant entity%s",
                 appliance_id,
+                f" (additionalApplianceDetails={details!r})" if details else "",
             )
             await self._async_ack(message_id, appliance_id, False)
             return
