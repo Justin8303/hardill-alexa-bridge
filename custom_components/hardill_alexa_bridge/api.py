@@ -146,14 +146,23 @@ class HardillWebSession:
         friendly_description: str,
         actions: list[str],
         appliance_types: list[str],
+        entity_id: str | None = None,
     ) -> dict[str, Any]:
         """Create one device and return Hardill's full stored object."""
-        payload = {
+        payload: dict[str, Any] = {
             "friendlyName": friendly_name,
             "friendlyDescription": friendly_description,
             "actions": actions,
             "applianceTypes": appliance_types,
         }
+        # Alexa echoes additionalApplianceDetails in command payloads. Keeping
+        # the HA entity id there lets the bridge resolve commands even if Alexa
+        # temporarily addresses a stale applianceId after a rename/recreate.
+        if entity_id:
+            payload["additionalApplianceDetails"] = {
+                "extraDetail1": entity_id,
+                "extraDetail2": "home_assistant",
+            }
         return await self._async_json_request(
             "PUT", MANAGE_DEVICES_URL, payload, expected=(201,)
         )

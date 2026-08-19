@@ -144,6 +144,24 @@ class HardillAlexaBridge:
         appliance_id = str(appliance_id)
         entity_id = self.mappings.get(appliance_id)
 
+        # Devices created by v0.3.3+ carry their HA entity id in Alexa's
+        # additionalApplianceDetails. Alexa keeps these details in its cached
+        # endpoint record and sends them back with commands. This makes a stale
+        # applianceId routable after Hardill had to recreate a renamed device.
+        if not entity_id:
+            details = appliance.get("additionalApplianceDetails") or {}
+            detail_entity_id = details.get("extraDetail1")
+            if (
+                isinstance(detail_entity_id, str)
+                and detail_entity_id in set(self.mappings.values())
+            ):
+                entity_id = detail_entity_id
+                _LOGGER.info(
+                    "Resolved stale Alexa device %s from additional appliance details to %s",
+                    appliance_id,
+                    entity_id,
+                )
+
         if not entity_id:
             _LOGGER.warning(
                 "Alexa device %s is not mapped to a Home Assistant entity",
