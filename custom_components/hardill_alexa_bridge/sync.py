@@ -195,6 +195,12 @@ class HardillExposureSync:
     def _schedule_sync(self) -> None:
         if self._stopping:
             return
+        # Registry/exposure events are also emitted while Home Assistant is still
+        # booting. Do not let them start remote HTTP reconciliation before the
+        # core has transitioned to RUNNING. EVENT_HOMEASSISTANT_STARTED will
+        # schedule the initial sync once startup has wrapped up.
+        if self.hass.state is not CoreState.running:
+            return
         if self._debounce_task is not None and not self._debounce_task.done():
             self._debounce_task.cancel()
         self._debounce_task = self.hass.async_create_task(

@@ -56,7 +56,10 @@ class HardillAlexaBridge:
         if self._task is not None:
             return
         self._stopping = False
-        self._task = self.hass.async_create_task(
+        # MQTT is a lifetime background worker. A normal hass.async_create_task()
+        # is tracked by Home Assistant as startup work and therefore prevents the
+        # STARTING -> RUNNING transition while this never-ending task is alive.
+        self._task = self.hass.async_create_background_task(
             self._async_run(),
             "Hardill Alexa Bridge MQTT",
         )
@@ -93,7 +96,7 @@ class HardillAlexaBridge:
                     async for message in client.messages:
                         if self._stopping:
                             return
-                        self.hass.async_create_task(
+                        self.hass.async_create_background_task(
                             self._async_handle_message(message.payload),
                             "Hardill Alexa command",
                         )
