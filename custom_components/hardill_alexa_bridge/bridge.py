@@ -41,6 +41,10 @@ class HardillAlexaBridge:
         self.username = username
         self.password = password
         self.mappings = {str(key): value for key, value in mappings.items() if value}
+        # Snapshot of the devices currently returned by Hardill's /api/v1/devices.
+        # This lets warnings distinguish a real-but-unmapped Hardill device from
+        # an Alexa-only ghost endpoint that Hardill no longer knows about.
+        self.remote_device_names: dict[str, str] = {}
         self._task: asyncio.Task[None] | None = None
         self._client: Client | None = None
         self._stopping = False
@@ -50,6 +54,10 @@ class HardillAlexaBridge:
         self.mappings = {
             str(key): value for key, value in mappings.items() if value
         }
+
+    def set_remote_device_names(self, devices: dict[str, str]) -> None:
+        """Replace the current Hardill appliance-id to friendly-name catalog."""
+        self.remote_device_names = {str(key): value for key, value in devices.items()}
 
     async def async_start(self) -> None:
         """Start the MQTT worker."""
@@ -173,10 +181,20 @@ class HardillAlexaBridge:
 
         if not entity_id:
             details = appliance.get("additionalApplianceDetails")
+            remote_name = self.remote_device_names.get(appliance_id)
+            if remote_name:
+                origin = f"Hardill currently knows it as {remote_name!r}"
+            elif self.remote_device_names:
+                origin = "not present in Hardill's current device list; likely a stale Alexa endpoint"
+            else:
+                origin = "Hardill device inventory has not been synchronized yet"
             _LOGGER.warning(
-                "Alexa device %s is not mapped to a Home Assistant entity%s",
+                "Alexa device %s is not mapped to a Home Assistant entity "
+                "(command=%s; %s%s)",
                 appliance_id,
-                f" (additionalApplianceDetails={details!r})" if details else "",
+                command,
+                origin,
+                f"; additionalApplianceDetails={details!r}" if details else "",
             )
             await self._async_ack(message_id, appliance_id, False)
             return

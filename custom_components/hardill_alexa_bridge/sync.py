@@ -244,6 +244,9 @@ class HardillExposureSync:
             return
 
         remote_by_id = {device.appliance_id: device for device in remote_devices}
+        self.bridge.set_remote_device_names(
+            {device.appliance_id: device.friendly_name for device in remote_devices}
+        )
         available_by_name: dict[str, list[HardillDevice]] = {}
         for device in remote_devices:
             available_by_name.setdefault(device.friendly_name.casefold(), []).append(device)
@@ -327,12 +330,22 @@ class HardillExposureSync:
             mappings[appliance_id] = entity_id
             used_remote.add(appliance_id)
 
-            # Hardill does not allow renaming an existing device. Recreate it if
-            # HA's friendly name changed.
+            # Hardill's legacy edit endpoint cannot change friendlyName. Older
+            # releases deleted + recreated the endpoint here, which changes the
+            # applianceId. Alexa v2 does not reliably forget the old endpoint and
+            # can keep sending commands to that ghost ID indefinitely. Preserve
+            # the existing applianceId instead. A later explicit rename workflow
+            # can recreate endpoints with an accompanying Alexa cleanup, but an
+            # ordinary HA alias/area rename must never churn IDs automatically.
             if remote.friendly_name != spec.name:
-                recreate.add(entity_id)
-                needs_admin = True
-                continue
+                _LOGGER.debug(
+                    "Preserving Hardill applianceId %s for %s although Alexa name "
+                    "is %r and Home Assistant now prefers %r",
+                    appliance_id,
+                    entity_id,
+                    remote.friendly_name,
+                    spec.name,
+                )
             if (
                 tuple(remote.raw.get("actions") or ()) != spec.actions
                 or tuple(remote.raw.get("applianceTypes") or ()) != spec.appliance_types
@@ -374,10 +387,9 @@ class HardillExposureSync:
                     for entity_id in sorted(removed_managed):
                         await self._async_delete_managed(admin, entity_id)
 
-                    # A rename requires delete + recreate because Hardill's edit API
-                    # deliberately keeps friendlyName immutable. Preserve the old
-                    # applianceId as a routing alias because Alexa may still address
-                    # it until device discovery has refreshed its cache.
+                    # Recreate only devices whose managed Hardill endpoint has
+                    # disappeared. Name changes intentionally do not enter this path
+                    # because changing applianceId creates persistent Alexa ghosts.
                     recreate_aliases: dict[str, list[str]] = {}
                     for entity_id in sorted(recreate):
                         record = self._managed.get(entity_id) or {}
@@ -455,6 +467,23 @@ class HardillExposureSync:
                     "Hardill device-management sync failed; existing mappings remain: %s",
                     err,
                 )
+
+        # Record remote endpoints that could not be associated with an exposed
+        # HA entity. If Alexa later invokes one of these IDs, bridge.py can include
+        # its Hardill friendly name in the warning. IDs not in this catalog at all
+        # are Alexa-only ghosts and cannot be reconstructed from the v2 command.
+        unmapped_remote = [
+            device for device in remote_devices if device.appliance_id not in mappings
+        ]
+        if unmapped_remote:
+            _LOGGER.info(
+                "Hardill has %d currently unmapped device(s): %s",
+                len(unmapped_remote),
+                ", ".join(
+                    f"{device.appliance_id}={device.friendly_name!r}"
+                    for device in unmapped_remote
+                ),
+            )
 
         await self._store.async_save({"managed": self._managed})
         self.bridge.set_mappings(mappings)

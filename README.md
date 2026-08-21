@@ -141,3 +141,13 @@ Remote Hardill device creation/update/deletion is no longer performed inside Hom
 - Resolves stale Alexa appliance IDs from `additionalApplianceDetails.extraDetail1` whenever the referenced Home Assistant entity still exists.
 - Caches a successfully recovered stale appliance ID for the current runtime.
 - Includes `additionalApplianceDetails` in the warning for truly unmapped Alexa endpoints to make old Alexa-cache entries diagnosable.
+
+
+## v0.3.7
+
+- Preserves existing Hardill `applianceId`s when Home Assistant names/aliases/areas change.
+  The legacy Hardill API cannot rename an endpoint in place, and delete/recreate leaves
+  stale Alexa v2 endpoints behind.
+- Unknown Alexa IDs now report the command and whether the ID still exists in Hardill's
+  current device inventory (including its friendly name) or is an Alexa-only ghost.
+- Logs currently unmapped Hardill devices after each reconciliation for easier recovery.
